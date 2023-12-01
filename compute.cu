@@ -6,93 +6,90 @@
 #include <cuda_runtime.h>
 #include "compute.h"
 
-#define BLOCK_SIZE 16
-#define EPSILON 1.0e-8
 
-__global__ void computeAccels(vector3* d_hPos, double* d_mass, vector3* d_accels) {
-    int i = threadIdx.x + blockIdx.x * blockDim.x;
-    int j = threadIdx.y + blockIdx.y * blockDim.y;
+__global__ void computeAccels(double* d_hPos, double* d_mass, vector3* d_accels) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (i < NUMENTITIES && j < NUMENTITIES) {
-        if (i != j) {
-            double distanceX = d_hPos[i][0] - d_hPos[j][0];
-            double distanceY = d_hPos[i][1] - d_hPos[j][1];
-            double distanceZ = d_hPos[i][2] - d_hPos[j][2];
-
-            double magnitude_sq = distanceX * distanceX + distanceY * distanceY + distanceZ * distanceZ;
+        if (i == j) {
+            FILL_VECTOR(d_accels[i*NUMENTITIES + j], 0, 0, 0);
+        }
+        else {
+            vector3 distance;
+            for (int k = 0; k < 3; k++) {
+                distance[k] = d_hPos[i*3 + k] - d_hPos[j*3 + k];
+            }
+            double magnitude_sq = distance[0] * distance[0] + distance[1] * distance[1] + distance[2] * distance[2];
             double magnitude = sqrt(magnitude_sq);
-
-            double force = GRAV_CONSTANT * d_mass[i] * d_mass[j] / (magnitude_sq + EPSILON);
-
-            double accX = force * distanceX / magnitude;
-            double accY = force * distanceY / magnitude;
-            double accZ = force * distanceZ / magnitude;
-
-            d_accels[i * NUMENTITIES + j][0] = accX;
-            d_accels[i * NUMENTITIES + j][1] = accY;
-            d_accels[i * NUMENTITIES + j][2] = accZ;
-
-        } else {
-
-            d_accels[i * NUMENTITIES + j][0] = 0.0;
-            d_accels[i * NUMENTITIES + j][1] = 0.0;
-            d_accels[i * NUMENTITIES + j][2] = 0.0;
+            double accelmag = -1 * GRAV_CONSTANT * d_mass[j] / magnitude_sq;
+            FILL_VECTOR(d_accels[i*NUMENTITIES + j], accelmag*distance[0] / magnitude, accelmag*distance[1] / magnitude, accelmag*distance[2] / magnitude);
         }
     }
 }
 
-__global__ void updateVelPos(vector3* d_hVel, vector3* d_hPos, vector3* d_accels, double* d_mass) {
+__global__ void updateVelPos(vector3* d_hVel, vector3* d_hPos, vector3* d_accels) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
 
     if (i < NUMENTITIES) {
 
-        double accX = 0.0;
-        double accY = 0.0;
-        double accZ = 0.0;
-
-        for (int j = 0; j < NUMENTITIES; ++j) {
-            accX += d_accels[i * NUMENTITIES + j][0];
-            accY += d_accels[i * NUMENTITIES + j][1];
-            accZ += d_accels[i * NUMENTITIES + j][2];
+        vector3 sum = {0,0,0};
+        for (int j = 0; j < NUMENTITIES; j++) {
+            for (int k = 0; k < 3; k++) {
+                sum[k] += d_accels[i*NUMENTITIES + j][k];
+            }
         }
-
-        d_hVel[i][0] += accX * INTERVAL;
-        d_hVel[i][1] += accY * INTERVAL;
-        d_hVel[i][2] += accZ * INTERVAL;
-
-        d_hPos[i][0] += d_hVel[i][0] * INTERVAL;
-        d_hPos[i][1] += d_hVel[i][1] * INTERVAL;
-        d_hPos[i][2] += d_hVel[i][2] * INTERVAL;
+        for (int k = 0; k < 3; k++) {
+            d_hVel[i][k] += sum[k] * INTERVAL;
+            d_hPos[i][k] += d_hVel[i][k] * INTERVAL;
+        }
     }
 }
 
 void compute() {
-    vector3 *d_hPos, *d_hVel;
-    double *d_mass;
+    //vector3 *d_hVel;
+    double *d_mass, *d_hPos;
     vector3 *d_accels;
 
-    cudaMalloc((void**)&d_hPos, sizeof(vector3) * NUMENTITIES);
-    cudaMalloc((void**)&d_hVel, sizeof(vector3) * NUMENTITIES);
+    cudaMalloc((void**)&d_hPos, sizeof(double) * 3 * NUMENTITIES);
+    //cudaMalloc((void**)&d_hVel, sizeof(vector3) * NUMENTITIES);
     cudaMalloc((void**)&d_mass, sizeof(double) * NUMENTITIES);
     cudaMalloc((void**)&d_accels, sizeof(vector3) * NUMENTITIES * NUMENTITIES);
 
-    cudaMemcpy(d_hPos, hPos, sizeof(vector3) * NUMENTITIES, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_hVel, hVel, sizeof(vector3) * NUMENTITIES, cudaMemcpyHostToDevice);
+
+    cudaMemcpy(d_hPos, hPos, sizeof(double) * 3 * NUMENTITIES, cudaMemcpyHostToDevice);
+    //cudaMemcpy(d_hVel, hVel, sizeof(vector3) * NUMENTITIES, cudaMemcpyHostToDevice);
     cudaMemcpy(d_mass, mass, sizeof(double) * NUMENTITIES, cudaMemcpyHostToDevice);
 
-    dim3 blockSize(BLOCK_SIZE, BLOCK_SIZE);
-    dim3 gridSize((NUMENTITIES + blockSize.x - 1) / blockSize.x, (NUMENTITIES + blockSize.y - 1) / blockSize.y);
+    dim3 blockSize(16,16);
+    dim3 gridSize((NUMENTITIES + blockSize.x -1)/ blockSize.x, (NUMENTITIES + blockSize.y - 1) / blockSize.y);
+
     computeAccels<<<gridSize, blockSize>>>(d_hPos, d_mass, d_accels);
     cudaDeviceSynchronize();
+    
 
-    updateVelPos<<<gridSize, blockSize>>>(d_hVel, d_hPos, d_accels, d_mass);
-    cudaDeviceSynchronize();
-
-    cudaMemcpy(hPos, d_hPos, sizeof(vector3) * NUMENTITIES, cudaMemcpyDeviceToHost);
-    cudaMemcpy(hVel, d_hVel, sizeof(vector3) * NUMENTITIES, cudaMemcpyDeviceToHost);
+    vector3* h_accels = (vector3*)malloc(sizeof(vector3) * NUMENTITIES * NUMENTITIES);
+    cudaMemcpy(h_accels, d_accels, NUMENTITIES * NUMENTITIES * sizeof(vector3), cudaMemcpyDeviceToHost);
 
     cudaFree(d_hPos);
-    cudaFree(d_hVel);
+    //cudaFree(d_hVel);
     cudaFree(d_mass);
     cudaFree(d_accels);
+
+        // Perform calculations using the computed accelerations
+    for (int i = 0; i < NUMENTITIES; i++) {
+        vector3 sum = { 0, 0, 0 };
+        for (int j = 0; j < NUMENTITIES; j++) {
+            for (int k = 0; k < 3; k++) {
+                sum[k] += h_accels[i * NUMENTITIES + j][k];
+            }
+        }
+
+        for (int k = 0; k < 3; k++) {
+            hVel[i][k] += sum[k] * INTERVAL;
+            hPos[i][k] += hVel[i][k] * INTERVAL;
+        }
+    }
+
+    free(h_accels);
 }
